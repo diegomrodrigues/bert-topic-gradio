@@ -8,6 +8,7 @@ from bertopic import BERTopic
 from bertopic.representation import KeyBERTInspired
 from umap import UMAP
 import numpy as np
+from collections import defaultdict
 
 class CustomArxivLoader(ArxivLoader):
     def __init__(self, **kwargs):
@@ -58,7 +59,7 @@ def process_documents(documents, umap_n_neighbors, umap_n_components, umap_min_d
     if not documents:
         return "No documents to process. Please upload a file first."
     
-    contents = [doc.page_content for doc in documents]
+    contents = ["\n".join([doc.metadata['Title'], doc.metadata['Summary'], doc.page_content]) for doc in documents]
 
     representation_model = KeyBERTInspired()
 
@@ -86,7 +87,7 @@ def process_documents(documents, umap_n_neighbors, umap_n_components, umap_min_d
     print("Topic Labels: ", topic_labels)
 
     return {
-        "topics": topics.tolist() if isinstance(topics, np.ndarray) else topics,  # Convert to list if it's a numpy array
+        "topics": topics.tolist() if isinstance(topics, np.ndarray) else topics,
         "labels": topic_labels,
         "documents": documents
     }
@@ -151,6 +152,12 @@ def create_markdown_content(state: Dict) -> str:
 
     return full_text
 
+def get_unique_topics(state: Dict) -> List[str]:
+    if not state or 'labels' not in state:
+        return []
+    return list(set(state['labels']))  # Remove .values() as labels is already a list
+
+
 with gr.Blocks(theme="default") as demo:
     gr.Markdown("# Bert Topic Article Organizer App")
     gr.Markdown("Organizes arxiv articles in different topics and exports it in a zip file.")
@@ -180,21 +187,25 @@ with gr.Blocks(theme="default") as demo:
             label="Processing Result",
             headers=["ID", "Topic", "Title"],
             col_count=(3, "fixed"),
-            interactive=True
+            interactive=False
         )
 
     with gr.Row():
-        remove_docs_button = gr.Button("Remove Selected Documents")
+        topic_dropdown = gr.Dropdown(
+            label="Select Topics to Remove",
+            multiselect=True,
+            interactive=True
+        )
         remove_topics_button = gr.Button("Remove Selected Topics")
 
     markdown_output = gr.File(label="Download Markdown", visible=False)
 
     def reprocess_documents(state, umap_n_neighbors, umap_n_components, umap_min_dist, min_topic_size, nr_topics):
         if not state or 'documents' not in state:
-            return "No documents to reprocess. Please upload a file first.", []
+            return "No documents to reprocess. Please upload a file first.", [], []
         
         new_state = process_documents(state['documents'], umap_n_neighbors, umap_n_components, umap_min_dist, min_topic_size, nr_topics)
-        return new_state, create_docs_matrix(new_state)
+        return new_state, create_docs_matrix(new_state), get_unique_topics(new_state)
 
     file_uploader.upload(
         fn=lambda file: upload_file(file), 
@@ -205,35 +216,25 @@ with gr.Blocks(theme="default") as demo:
         inputs=[state, umap_n_neighbors, umap_n_components, umap_min_dist, min_topic_size, nr_topics],
         outputs=[state]
     ).then(
-        fn=create_docs_matrix,
+        fn=lambda state: (create_docs_matrix(state), get_unique_topics(state)),
         inputs=[state],
-        outputs=[output_matrix]
+        outputs=[output_matrix, topic_dropdown]
     )
 
     reprocess_button.click(
         fn=reprocess_documents,
         inputs=[state, umap_n_neighbors, umap_n_components, umap_min_dist, min_topic_size, nr_topics],
-        outputs=[state, output_matrix]
-    )
-
-    remove_docs_button.click(
-        fn=lambda state, df: remove_documents(state, [int(row[0]) for row in df if row[0]]),
-        inputs=[state, output_matrix],
-        outputs=[state]
-    ).then(
-        fn=reprocess_documents,
-        inputs=[state, umap_n_neighbors, umap_n_components, umap_min_dist, min_topic_size, nr_topics],
-        outputs=[state, output_matrix]
+        outputs=[state, output_matrix, topic_dropdown]
     )
 
     remove_topics_button.click(
-        fn=lambda state, df: remove_topics(state, list(set(row[1] for row in df if row[1]))),
-        inputs=[state, output_matrix],
+        fn=remove_topics,
+        inputs=[state, topic_dropdown],
         outputs=[state]
     ).then(
         fn=reprocess_documents,
         inputs=[state, umap_n_neighbors, umap_n_components, umap_min_dist, min_topic_size, nr_topics],
-        outputs=[state, output_matrix]
+        outputs=[state, output_matrix, topic_dropdown]
     )
 
     download_button.click(
