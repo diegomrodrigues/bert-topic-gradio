@@ -59,7 +59,7 @@ def process_documents(documents, umap_n_neighbors, umap_n_components, umap_min_d
     if not documents:
         return "No documents to process. Please upload a file first."
     
-    contents = ["\n".join([doc.metadata['Title'], doc.metadata['Summary'], doc.page_content]) for doc in documents]
+    contents = [doc.page_content for doc in documents]
 
     representation_model = KeyBERTInspired()
 
@@ -86,83 +86,57 @@ def process_documents(documents, umap_n_neighbors, umap_n_components, umap_min_d
     print(f"Generated {len(topic_labels)} topics from data.")
     print("Topic Labels: ", topic_labels)
 
-    return {
-        "topics": topics.tolist() if isinstance(topics, np.ndarray) else topics,
-        "labels": topic_labels,
-        "documents": documents
-    }
+    return documents, topics.tolist() if isinstance(topics, np.ndarray) else topics, topic_labels
 
-def create_docs_matrix(state: Dict) -> List[List[str]]:
-    if not state or 'documents' not in state:
+def create_docs_matrix(documents: List[Document], topics: List[int], labels: List[str]) -> List[List[str]]:
+    if not documents:
         return []
     results = []
-    for i, (doc, topic) in enumerate(zip(state['documents'], state['topics'])):
-        label = state['labels'][topic]
+    for i, (doc, topic) in enumerate(zip(documents, topics)):
+        label = labels[topic]
         results.append([str(i), label, doc.metadata['Title']])
     return results
 
-def remove_documents(state: Dict, rows_to_remove: List[int]) -> Dict:
-    if not state or 'documents' not in state:
-        return state
-    
-    new_documents = [doc for i, doc in enumerate(state['documents']) if i not in rows_to_remove]
-    new_topics = [topic for i, topic in enumerate(state['topics']) if i not in rows_to_remove]
-    
-    return {
-        "documents": new_documents,
-        "topics": new_topics,
-        "labels": state['labels']
-    }
+def get_unique_topics(labels: List[str]) -> List[str]:
+    return list(set(labels))
 
-def remove_topics(state: Dict, topics_to_remove: List[str]) -> Dict:
-    if not state or 'documents' not in state:
-        return state
-    
+def remove_topics(documents: List[Document], topics: List[int], labels: List[str], topics_to_remove: List[str]) -> tuple:
     new_documents = []
     new_topics = []
+    new_labels = []
     
-    for doc, topic in zip(state['documents'], state['topics']):
-        if state['labels'][topic] not in topics_to_remove:
+    for doc, topic, label in zip(documents, topics, labels):
+        if label not in topics_to_remove:
             new_documents.append(doc)
             new_topics.append(topic)
+            new_labels.append(label)
     
-    return {
-        "documents": new_documents,
-        "topics": new_topics,
-        "labels": state['labels']
-    }
+    return new_documents, new_topics, new_labels
 
-def create_markdown_content(state: Dict) -> str:
-    if not state or 'documents' not in state or 'topics' not in state or 'labels' not in state:
+def create_markdown_content(documents: List[Document], labels: List[str]) -> str:
+    if not documents or not labels:
         return "No data available for download."
 
     topic_documents = defaultdict(list)
-    for doc, topic in zip(state['documents'], state['topics']):
-        topic_label = state['labels'][topic]
-        topic_documents[topic_label].append(doc)
+    for doc, label in zip(documents, labels):
+        topic_documents[label].append(doc)
 
     full_text = "# Arxiv Articles by Topic\n\n"
 
-    for topic, documents in topic_documents.items():
+    for topic, docs in topic_documents.items():
         full_text += f"## {topic}\n\n"
 
-        for document in documents:
+        for document in docs:
             full_text += f"### {document.metadata['Title']}\n\n"
             full_text += f"{document.metadata['Summary']}\n\n"
 
     return full_text
 
-def get_unique_topics(state: Dict) -> List[str]:
-    if not state or 'labels' not in state:
-        return []
-    return list(set(state['labels']))  # Remove .values() as labels is already a list
-
-
 with gr.Blocks(theme="default") as demo:
     gr.Markdown("# Bert Topic Article Organizer App")
     gr.Markdown("Organizes arxiv articles in different topics and exports it in a zip file.")
 
-    state = gr.State(value={})
+    state = gr.State(value=[])
 
     with gr.Row():
         file_uploader = gr.UploadButton(
@@ -200,49 +174,51 @@ with gr.Blocks(theme="default") as demo:
 
     markdown_output = gr.File(label="Download Markdown", visible=False)
 
-    def reprocess_documents(state, umap_n_neighbors, umap_n_components, umap_min_dist, min_topic_size, nr_topics):
-        if not state or 'documents' not in state:
-            return "No documents to reprocess. Please upload a file first.", [], []
-        
-        new_state = process_documents(state['documents'], umap_n_neighbors, umap_n_components, umap_min_dist, min_topic_size, nr_topics)
-        return new_state, create_docs_matrix(new_state), get_unique_topics(new_state)
+    def update_ui(documents, topics, labels):
+        matrix = create_docs_matrix(documents, topics, labels)
+        unique_topics = get_unique_topics(labels)
+        return matrix, unique_topics
+
+    def process_and_update(state, umap_n_neighbors, umap_n_components, umap_min_dist, min_topic_size, nr_topics):
+        documents = state if state else []
+        new_documents, new_topics, new_labels = process_documents(documents, umap_n_neighbors, umap_n_components, umap_min_dist, min_topic_size, nr_topics)
+        matrix, unique_topics = update_ui(new_documents, new_topics, new_labels)
+        return [new_documents, new_topics, new_labels], matrix, unique_topics
 
     file_uploader.upload(
         fn=lambda file: upload_file(file), 
         inputs=[file_uploader],
         outputs=[state]
     ).then(
-        fn=process_documents,
+        fn=process_and_update,
         inputs=[state, umap_n_neighbors, umap_n_components, umap_min_dist, min_topic_size, nr_topics],
-        outputs=[state]
-    ).then(
-        fn=lambda state: (create_docs_matrix(state), get_unique_topics(state)),
-        inputs=[state],
-        outputs=[output_matrix, topic_dropdown]
+        outputs=[state, output_matrix, topic_dropdown]
     )
 
     reprocess_button.click(
-        fn=reprocess_documents,
+        fn=process_and_update,
         inputs=[state, umap_n_neighbors, umap_n_components, umap_min_dist, min_topic_size, nr_topics],
         outputs=[state, output_matrix, topic_dropdown]
     )
+
+    def remove_and_update(state, topics_to_remove, umap_n_neighbors, umap_n_components, umap_min_dist, min_topic_size, nr_topics):
+        documents, topics, labels = state
+        new_documents, new_topics, new_labels = remove_topics(documents, topics, labels, topics_to_remove)
+        return process_and_update([new_documents, new_topics, new_labels], umap_n_neighbors, umap_n_components, umap_min_dist, min_topic_size, nr_topics)
 
     remove_topics_button.click(
-        fn=remove_topics,
-        inputs=[state, topic_dropdown],
-        outputs=[state]
-    ).then(
-        fn=reprocess_documents,
-        inputs=[state, umap_n_neighbors, umap_n_components, umap_min_dist, min_topic_size, nr_topics],
+        fn=remove_and_update,
+        inputs=[state, topic_dropdown, umap_n_neighbors, umap_n_components, umap_min_dist, min_topic_size, nr_topics],
         outputs=[state, output_matrix, topic_dropdown]
     )
 
+    def create_download_file(state):
+        documents, _, labels = state
+        content = create_markdown_content(documents, labels)
+        return gr.File(value=content, visible=True, filename="arxiv_articles_by_topic.md")
+
     download_button.click(
-        fn=lambda state: gr.File.update(
-            value=create_markdown_content(state),
-            visible=True,
-            filename="arxiv_articles_by_topic.md"
-        ),
+        fn=create_download_file,
         inputs=[state],
         outputs=[markdown_output]
     )
